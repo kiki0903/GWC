@@ -15,13 +15,15 @@ st.set_page_config(
     layout="wide"
 )
 
-# Small CSS tweaks for a cleaner look
+# Small CSS tweaks for a cleaner, “app-like” look
 st.markdown(
     """
     <style>
     .main {
         padding-top: 1rem;
         padding-bottom: 2rem;
+        max-width: 1100px;
+        margin: 0 auto;
     }
     .stMetric {
         background-color: #f8fafc;
@@ -29,14 +31,14 @@ st.markdown(
         padding: 0.75rem 1rem;
         border: 1px solid #e5e7eb;
     }
-    .question-card {
+    .card {
         padding: 1.25rem 1.5rem;
         border-radius: 1rem;
         border: 1px solid #e5e7eb;
         background-color: #ffffff;
-        box-shadow: 0 8px 20px rgba(15,23,42,0.03);
+        box-shadow: 0 8px 20px rgba(15,23,42,0.04);
     }
-    .result-card {
+    .card-muted {
         padding: 1.25rem 1.5rem;
         border-radius: 1rem;
         border: 1px solid #e5e7eb;
@@ -56,7 +58,7 @@ def load_data():
     data = fetch_ucirepo(id=426)  # UCI Adult Autism dataset
     df = pd.concat([data.data.features, data.data.targets], axis=1)
 
-    # Keep only AQ-10 scores + jaundice + family_pdd + class
+    # Drop non-AQ / demo columns we are not using in the model
     df = df.drop(
         columns=[
             "country_of_res",
@@ -95,7 +97,19 @@ def train_model(df):
     y = df["class"]
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X, y)
-    return model, X.columns.tolist()
+
+    # Dataset-level probability stats
+    proba_all = model.predict_proba(X)[:, 1]
+    stats = {
+        "avg_all": float(np.mean(proba_all)),
+        "avg_positive": float(np.mean(proba_all[y == 1])),
+        "avg_negative": float(np.mean(proba_all[y == 0])),
+        "p25": float(np.percentile(proba_all, 25)),
+        "p50": float(np.percentile(proba_all, 50)),
+        "p75": float(np.percentile(proba_all, 75)),
+    }
+
+    return model, X.columns.tolist(), stats
 
 
 def main():
@@ -106,15 +120,16 @@ def main():
         st.markdown("### ℹ️ About this tool")
         st.write(
             "This web app uses a machine-learning model trained on the "
-            "UCI Adult Autism Screening dataset (AQ-10) to estimate the "
-            "likelihood of autism-related traits based on your answers."
+            "UCI Adult Autism Screening dataset (AQ-10) to estimate how "
+            "similar your answers are to people who screened positive for "
+            "autism-related traits."
         )
 
         st.markdown("**Important:**")
         st.caption(
             "- This is **not** a diagnosis.\n"
             "- Results are for **education and self-reflection only**.\n"
-            "- Please talk to a qualified clinician for any concerns."
+            "- Talk to a qualified clinician if you have concerns."
         )
 
         st.markdown("---")
@@ -127,27 +142,27 @@ def main():
 
     with col_left:
         st.markdown("#### Autism Traits Screener")
-        st.title("🧠 Quick AQ-10–style screening")
+        st.title("🧠 AQ-10–style machine-learning screening")
         st.write(
-            "Answer a short set of questions about how you experience the world. "
-            "A machine-learning model will estimate the likelihood that your "
-            "responses resemble those of people who screened positive for "
-            "autism-related traits in the research dataset."
+            "Answer ten short questions about how you experience social situations, "
+            "communication, and attention. A trained Random Forest model will estimate the "
+            "likelihood that your pattern of responses resembles those of adults who "
+            "screened positive for autism-related traits in a research dataset."
         )
 
     with col_right:
-        st.markdown("##### How it works")
+        st.markdown("##### How this app works")
         st.write(
-            "1. You complete 10 trait questions.\n"
-            "2. The model computes a probability score.\n"
-            "3. You get a friendly explanation of the result."
+            "1. You answer 10 AQ-style questions.\n"
+            "2. The model computes a probability score (0–100%).\n"
+            "3. Your score is compared to averages in the dataset.\n"
         )
 
     st.markdown("---")
 
     # Load data & model
     df, le_family, question_cols = load_data()
-    model, feature_cols = train_model(df)
+    model, feature_cols, stats = train_model(df)
 
     # ----------------------
     # Question text mapping
@@ -165,7 +180,6 @@ def main():
         "I often find it difficult to understand what others intend to do.",
     ]
 
-    # Safety check: make sure there are 10 question columns
     assert len(question_cols) == len(pretty_questions), "Mismatch between AQ items and columns."
 
     # ---------------
@@ -174,7 +188,7 @@ def main():
     st.markdown("### 📝 Screening questions")
 
     with st.container():
-        st.markdown('<div class="question-card">', unsafe_allow_html=True)
+        st.markdown('<div class="card">', unsafe_allow_html=True)
 
         with st.form("autism_form"):
             answers = []
@@ -197,7 +211,7 @@ def main():
                 )
             with col2:
                 family_pdd = st.selectbox(
-                    "Family history of autism or other pervasive developmental conditions?",
+                    "Family history of autism or related developmental conditions?",
                     le_family.classes_,
                 )
 
@@ -211,43 +225,45 @@ def main():
     if submitted:
         # Build input row as a dict keyed by feature names
         input_dict = {}
-
-        # Map AQ answers to their original A1_Score…A10_Score columns
         for col, ans in zip(question_cols, answers):
             input_dict[col] = ans
 
         input_dict["jaundice"] = 1 if jaundice == "yes" else 0
         input_dict["family_pdd"] = le_family.transform([family_pdd])[0]
 
-        # Convert to DataFrame in the same column order as training
+        # Convert to DataFrame in same order as training features
         input_df = pd.DataFrame([input_dict])[feature_cols]
 
         prediction = model.predict(input_df)[0]
-        proba = model.predict_proba(input_df)[0][1]
+        proba = float(model.predict_proba(input_df)[0][1])
 
         st.markdown("### 📊 Your screening result")
-        st.markdown('<div class="result-card">', unsafe_allow_html=True)
+        st.markdown('<div class="card-muted">', unsafe_allow_html=True)
 
-        # Metric row
-        mcol1, mcol2 = st.columns([1, 1])
-        with mcol1:
+        # Top summary metrics
+        m1, m2, m3 = st.columns(3)
+        with m1:
             st.metric(
-                label="Estimated likelihood of autism-related traits",
+                label="Your estimated likelihood",
                 value=f"{proba * 100:.1f}%",
             )
-        with mcol2:
-            label_text = "Higher-than-average" if proba >= 0.5 else "Lower-than-average"
-            st.metric(label="Pattern relative to dataset", value=label_text)
+        with m2:
+            st.metric(
+                label="Average likelihood in dataset",
+                value=f"{stats['avg_all'] * 100:.1f}%",
+            )
+        with m3:
+            label_text = "Higher than dataset average" if proba > stats["avg_all"] else "Lower than dataset average"
+            st.metric(label="Relative to dataset", value=label_text)
 
         # Text explanation
         if prediction == 1:
             st.warning(
                 "### ⚠️ Model interpretation: *Likely positive pattern*\n"
-                "Your answers are similar to people who screened **positive** for autism traits "
+                "Your answers are similar to people who **screened positive** for autism traits "
                 "in the research dataset.\n\n"
-                "**This is not a diagnosis.** A formal evaluation with a qualified clinician is "
-                "the only way to diagnose autism. If you have concerns, consider sharing your "
-                "experiences and this result with a healthcare professional."
+                "This result **does not equal a diagnosis**. If this resonates with your lived "
+                "experience, it may be worth discussing with a clinician or trusted professional."
             )
         else:
             st.success(
@@ -255,23 +271,39 @@ def main():
                 "Your responses **do not strongly match** the pattern of people who screened "
                 "positive for autism traits in the dataset.\n\n"
                 "However, screening tools and machine-learning models are imperfect. "
-                "If you still feel that autism might describe your experiences, it can still "
-                "be worth talking with a clinician or trusted professional."
+                "If you feel that autism might still describe your experiences, it is completely "
+                "valid to seek a professional opinion."
             )
 
-        # Score bar
-        st.markdown("#### Score position")
-        fig, ax = plt.subplots(figsize=(6, 0.8))
-        ax.barh(["Your score"], [proba], color="orange", height=0.3)
+        # --------------------
+        # Comparison chart
+        # --------------------
+        st.markdown("#### How your score compares")
+
+        labels = ["Your score", "Dataset average", "Average (positive group)", "Average (negative group)"]
+        values = [
+            proba,
+            stats["avg_all"],
+            stats["avg_positive"],
+            stats["avg_negative"],
+        ]
+
+        fig, ax = plt.subplots(figsize=(7, 2.2))
+        ax.barh(labels, values, height=0.4)
         ax.set_xlim(0, 1)
         ax.set_xlabel("Estimated likelihood (0–1)")
-        ax.set_yticks([0])
-        ax.set_yticklabels(["Your score"], fontsize=10)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.spines["left"].set_visible(False)
         plt.tight_layout()
         st.pyplot(fig)
+
+        # Small note under chart
+        st.caption(
+            "The model’s averages are computed on the original research dataset. "
+            "“Positive group” refers to participants labeled as having autism; "
+            "“negative group” refers to participants labeled as not having autism."
+        )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
